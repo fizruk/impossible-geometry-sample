@@ -1,12 +1,14 @@
-{-# LANGUAGE TupleSections #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
 module Main where
 
-import Control.Arrow
 import Control.Applicative
 import Control.Monad.State
+import Control.Lens
 
 import Data.Ord
-import Data.Function
 import Data.Maybe
 import Data.Graph
 import Data.Monoid
@@ -20,18 +22,17 @@ import Debug.Trace
 
 type Size = Float
 
-newtype FigureId = FigureId
-  { getFigureId :: Int }
-  deriving (Eq, Ord, Show)
+type FigureId = Int
 
 data Pos = Pos
-  { posX :: Float
-  , posY :: Float
-  , posZ :: Float }
+  { _posX :: Float
+  , _posY :: Float
+  , _posZ :: Float }
   deriving (Eq, Show)
+makeLenses ''Pos
 
 instance Ord Pos where
-  compare = comparing posY <> comparing (liftA2 (+) posX posY)
+  compare = comparing $ \(Pos x y z) -> (y, x + z)
 
 instance Num Pos where
   Pos x y z + Pos x' y' z' = Pos (x + x') (y + y') (z + z')
@@ -40,32 +41,30 @@ instance Num Pos where
 (.*) :: Float -> Pos -> Pos
 n .* Pos x y z = Pos (n * x) (n * y) (n * z)
 
-newtype Face = Face
-  { getFace :: [Pos] }
-  deriving (Show)
+type Face = [Pos]
 
-newtype Figure = Figure
-  { getFigure :: [Face] }
-  deriving (Show)
+type Figure = [Face]
 
 faceClosestPoint :: Face -> Pos
-faceClosestPoint = minimum . getFace
+faceClosestPoint = minimum
 
 figureClosestPoint :: Figure -> Pos
-figureClosestPoint = minimum . map faceClosestPoint . getFigure
+figureClosestPoint = minimum . map faceClosestPoint
 
 move :: Pos -> Figure -> Figure
-move p = Figure . map (Face . map (+ p) . getFace) . getFigure
+move p = map $ map (+ p)
 
 data WorldFigure = WorldFigure
-  { worldFigure   :: Figure
-  , worldFigureId :: FigureId }
+  { _worldFigure   :: Figure
+  , _worldFigureId :: FigureId }
   deriving (Show)
+makeLenses ''WorldFigure
 
 data World = World
-  { worldFigures :: [WorldFigure]
-  , worldRules   :: Map FigureId ([FigureId], [FigureId]) }
+  { _worldFigures :: [WorldFigure]
+  , _worldRules   :: Map FigureId ([FigureId], [FigureId]) }
   deriving (Show)
+makeLenses ''World
 
 instance Monoid World where
   mempty = World mempty mempty
@@ -75,20 +74,20 @@ type WorldBuilder = State ([FigureId], World)
 
 freshFigureId :: WorldBuilder FigureId
 freshFigureId = do
-  (x:xs, w) <- get
-  put (xs, w)
+  x:xs <- use _1
+  _1 .= xs
   return x
 
 figure :: Figure -> WorldBuilder WorldFigure
 figure x = do
   f <- WorldFigure x <$> freshFigureId
-  modify (second (\(World fs rs) -> World (f:fs) rs))
+  _2.worldFigures %= (f:)
   return f
 
 cube :: Size -> Pos -> WorldBuilder WorldFigure
 cube s p = figure $ move p cube'
   where
-    cube' = Figure . map (Face . map (s .*)) $
+    cube' = map (map (s .*)) $
       [ [Pos 0 0 0, Pos 0 0 1, Pos 0 1 1, Pos 0 1 0 ]
       , [Pos 0 0 0, Pos 0 1 0, Pos 1 1 0, Pos 1 0 0 ]
       , [Pos 0 0 0, Pos 1 0 0, Pos 1 0 1, Pos 0 0 1 ]
@@ -105,14 +104,14 @@ posTo2D :: Pos -> Point
 posTo2D (Pos x y z) = (cos (pi / 6) * (x - z), y - sin (pi / 6) * (x + z) )
 
 faceTo2D :: Face -> Maybe Face2D
-faceTo2D (Face ps@(p:q:r:_))
+faceTo2D ps@(p:q:r:_)
   | visible   = Just $ Face2D (map posTo2D ps) light
   | otherwise = Nothing
   where
     n = normal (p - q) (q - r)
     screenN = Pos 1 1 1
     lightN  = Pos 0.3 (- 1) 0
-    light   = traceShow n $ 0.5 * (1 + scalar n lightN)
+    light   = 0.5 * (1 + scalar n lightN)
     (p':q':r':_) = map posTo2D ps
     visible = orientation p' q' r' == GT
 
@@ -150,22 +149,22 @@ rotatePosZ a (Pos ox oy _) (Pos x y z) = Pos x' y' z
   where (x', y') = rotate2D a (ox, oy) (x, y)
 
 rotateX :: Float -> Pos -> Figure -> Figure
-rotateX a p = Figure . map (Face . map (rotatePosX a p) . getFace) . getFigure
+rotateX a p = map $ map (rotatePosX a p)
 
 rotateY :: Float -> Pos -> Figure -> Figure
-rotateY a p = Figure . map (Face . map (rotatePosY a p) . getFace) . getFigure
+rotateY a p = map $ map (rotatePosY a p)
 
 rotateZ :: Float -> Pos -> Figure -> Figure
-rotateZ a p = Figure . map (Face . map (rotatePosZ a p) . getFace) . getFigure
+rotateZ a p = map $ map (rotatePosZ a p)
 
 drawFace2D :: Face2D -> Picture
 drawFace2D (Face2D p l) = color (greyN l) $ polygon p
 
 drawWorld :: World -> Picture
-drawWorld = pictures . map (drawFigure . worldFigure) . worldFigures
+drawWorld w = pictures $ w ^.. worldFigures.traverse.worldFigure.to drawFigure
 
 drawFigure :: Figure -> Picture
-drawFigure = pictures . catMaybes . map (fmap drawFace2D . faceTo2D) . getFigure
+drawFigure = pictures . catMaybes . map (fmap drawFace2D . faceTo2D)
 
 testWorld :: WorldBuilder ()
 testWorld = do
@@ -173,12 +172,10 @@ testWorld = do
   return ()
 
 create :: WorldBuilder a -> World
-create = snd . flip execState (map FigureId [1..], mempty)
+create = snd . flip execState ([1..], mempty)
 
 updateWorld :: World -> World
-updateWorld (World fs rs) = World fs' rs
-  where
-    fs' = map (\(WorldFigure f i) -> WorldFigure (rotateY 0.1 (Pos 0 0 0) f) i) fs
+updateWorld = worldFigures.traverse.worldFigure %~ rotateY 0.1 (Pos 0 0 0)
 
 main :: IO ()
 main = play display' black 30 (create testWorld) (scale gameScale gameScale . drawWorld) (flip const) (const updateWorld)
