@@ -9,7 +9,6 @@ import Control.Monad.State
 import Control.Lens
 
 import Data.Ord
-import Data.Maybe
 import Data.Graph
 import Data.Monoid
 
@@ -32,7 +31,7 @@ data Pos = Pos
 makeLenses ''Pos
 
 instance Ord Pos where
-  compare = comparing $ \(Pos x y z) -> (y, x + z)
+  compare = comparing $ \(Pos x y z) -> x + y + z
 
 instance Num Pos where
   Pos x y z + Pos x' y' z' = Pos (x + x') (y + y') (z + z')
@@ -46,17 +45,15 @@ type Face = [Pos]
 type Figure = [Face]
 
 faceClosestPoint :: Face -> Pos
-faceClosestPoint = minimum
-
-figureClosestPoint :: Figure -> Pos
-figureClosestPoint = minimum . map faceClosestPoint
+faceClosestPoint = maximum
 
 move :: Pos -> Figure -> Figure
 move p = map $ map (+ p)
 
 data WorldFigure = WorldFigure
-  { _worldFigure   :: Figure
-  , _worldFigureId :: FigureId }
+  { _worldFigure      :: Figure
+  , _worldFigureColor :: Color
+  , _worldFigureId    :: FigureId }
   deriving (Show)
 makeLenses ''WorldFigure
 
@@ -78,14 +75,14 @@ freshFigureId = do
   _1 .= xs
   return x
 
-figure :: Figure -> WorldBuilder WorldFigure
-figure x = do
-  f <- WorldFigure x <$> freshFigureId
+figure :: Color -> Figure -> WorldBuilder WorldFigure
+figure c x = do
+  f <- WorldFigure x c <$> freshFigureId
   _2.worldFigures %= (f:)
   return f
 
-cube :: Size -> Pos -> WorldBuilder WorldFigure
-cube s p = figure $ move p cube'
+cube :: Size -> Color -> Pos -> WorldBuilder WorldFigure
+cube s c p = figure c $ move p cube'
   where
     cube' = map (map (s .*)) $
       [ [Pos 0 0 0, Pos 0 0 1, Pos 0 1 1, Pos 0 1 0 ]
@@ -93,12 +90,14 @@ cube s p = figure $ move p cube'
       , [Pos 0 0 0, Pos 1 0 0, Pos 1 0 1, Pos 0 0 1 ]
       , [Pos 1 1 1, Pos 1 0 1, Pos 1 0 0, Pos 1 1 0 ]
       , [Pos 1 1 1, Pos 0 1 1, Pos 0 0 1, Pos 1 0 1 ]
-      , [Pos 1 1 1, Pos 1 1 0, Pos 0 1 0, Pos 0 1 1 ] ]
+      , [Pos 1 1 1, Pos 1 1 0, Pos 0 1 0, Pos 0 1 1 ]
+      ]
 
 data Face2D = Face2D
-  { getFace2D :: Path
-  , faceLight :: Float }
+  { _getFace2D :: Path
+  , _faceLight :: Float }
   deriving (Show)
+makeLenses ''Face2D
 
 posTo2D :: Pos -> Point
 posTo2D (Pos x y z) = (cos (pi / 6) * (x - z), y - sin (pi / 6) * (x + z) )
@@ -110,7 +109,7 @@ faceTo2D ps@(p:q:r:_)
   where
     n = normal (p - q) (q - r)
     screenN = Pos 1 1 1
-    lightN  = Pos 0.3 (- 1) 0
+    lightN  = Pos 1 (- 3) (- 1)
     light   = 0.5 * (1 + scalar n lightN)
     (p':q':r':_) = map posTo2D ps
     visible = orientation p' q' r' == GT
@@ -119,10 +118,13 @@ normal :: Pos -> Pos -> Pos
 normal x = normalize . cross x
 
 orientation :: Point -> Point -> Point -> Ordering
-orientation (x, y) (u, v) (w, z) = ((x - u) * (v - z) - (u - w) * (y - v)) `compare` 0
+orientation p q r = cross2D (p .- q) (q .- r) `compare` 0
 
 scalar :: Pos -> Pos -> Float
 scalar (Pos x y z) (Pos x' y' z') = x * x' + y * y' + z * z'
+
+cross2D :: Point -> Point -> Float
+cross2D (x, y) (x', y') = x * y' - x' * y
 
 cross :: Pos -> Pos -> Pos
 cross (Pos x y z) (Pos x' y' z') = Pos (y * z' - y' * z) (x * z' - x' * z) (x * y' - x' * y)
@@ -157,31 +159,77 @@ rotateY a p = map $ map (rotatePosY a p)
 rotateZ :: Float -> Pos -> Figure -> Figure
 rotateZ a p = map $ map (rotatePosZ a p)
 
-drawFace2D :: Face2D -> Picture
-drawFace2D (Face2D p l) = color (greyN l) $ polygon p
+overlapEdges :: [Point] -> [Point] -> Bool
+overlapEdges xs ys = or $ zipWith f ex ey
+  where
+    ex = zip xs $ tail (cycle xs)
+    ey = zip ys $ tail (cycle ys)
+    f (p, q) (p', q')
+      =  orientation p  q  p' /= orientation p  q  q'
+      && orientation p' q' p  /= orientation p' q' q
+
+overlap :: [Point] -> [Point] -> Bool
+overlap = any . inside
+  where
+    inside :: [Point] -> Point -> Bool
+    inside xs y = all (f y) $ zip xs (tail $ cycle xs)
+
+    f :: Point -> (Point, Point) -> Bool
+    f p (a, b) = 0 < cross (a .- p) (b .- p)
 
 drawWorld :: World -> Picture
-drawWorld w = pictures $ w ^.. worldFigures.traverse.worldFigure.to drawFigure
+drawWorld w = traceShow g $ pictures $ map (uncurry drawFace2D) faces''
+  where
+    figures = w ^. worldFigures
+    rules = w ^. worldRules
+    faces = [ (face, face2D, figId, figCol)
+            | fig <- figures
+            , face <- fig ^. worldFigure
+            , face2D <- face ^.. to faceTo2D.traverse
+            , let figId = fig ^. worldFigureId
+            , let figCol = fig ^. worldFigureColor ]
+    faces' = zip [1..] faces
+    edges = [ ((figCol, face2D), k, ks)
+            | (k, (face, face2D, figId, figCol)) <- faces'
+            , let (behinds, aheads) = Map.findWithDefault mempty figId rules
+            , let ks = [ k'
+                       | (k', (face', face2D', figId', _)) <- faces'
+                       , k /= k'
+                       , overlap (face2D ^. getFace2D) (face2D' ^. getFace2D)
+                       || overlapEdges (face2D ^. getFace2D) (face2D' ^. getFace2D)
+                       , figId' `elem` aheads || figId' `notElem` behinds &&
+                         faceClosestPoint face' > faceClosestPoint face
+                       ] ]
+    (g, fromV, _) = graphFromEdges edges
+    faces'' = map (view _1 . fromV) $ topSort g
 
-drawFigure :: Figure -> Picture
-drawFigure = pictures . catMaybes . map (fmap drawFace2D . faceTo2D)
+drawFace2D :: Color -> Face2D -> Picture
+drawFace2D c (Face2D p l) = color (c `addColors` greyN l) $ polygon p
+
+cubes :: Size -> Color -> [Pos] -> WorldBuilder [WorldFigure]
+cubes s c = mapM $ cube s c
 
 testWorld :: WorldBuilder ()
 testWorld = do
-  cube 1 (Pos 0 0 0)
+  cube 0.9 (dark green) $ Pos 0 0 0
+  cube 0.9 (dark red)   $ Pos 1 0 0
+  _2.worldFigures.traverse.worldFigure %= rotateY (pi/4) (Pos 0.5 0.5 0.5)
   return ()
 
 create :: WorldBuilder a -> World
-create = snd . flip execState ([1..], mempty)
+create = join traceShow . snd . flip execState ([1..], mempty)
 
 updateWorld :: World -> World
-updateWorld = worldFigures.traverse.worldFigure %~ rotateY 0.1 (Pos 0 0 0)
+updateWorld = worldFigures.traverse.worldFigure %~ rotateY (- 0.1) (Pos 0.5 0.5 0.5)
 
 main :: IO ()
-main = play display' black 30 (create testWorld) (scale gameScale gameScale . drawWorld) (flip const) (const updateWorld)
+main = play display' black 10 (create testWorld) (scale gameScale gameScale . drawWorld) (flip const) (const updateWorld)
   where
     display' = InWindow "Isometry" (640, 480) (200, 200)
 
 gameScale :: Float
 gameScale = 20
+
+(.-) :: Vector -> Vector -> Vector
+(x, y) .- (x', y') = (x - x', y - y')
 
