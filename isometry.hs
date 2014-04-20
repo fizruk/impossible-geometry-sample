@@ -10,6 +10,8 @@ import Control.Lens
 
 import Data.Ord
 import Data.Graph
+import Data.List
+import Data.Maybe
 import Data.Monoid
 
 import Data.Map (Map)
@@ -175,7 +177,7 @@ overlap = any . inside
     inside xs y = all (f y) $ zip xs (tail $ cycle xs)
 
     f :: Point -> (Point, Point) -> Bool
-    f p (a, b) = 0 < cross (a .- p) (b .- p)
+    f p (a, b) = 0 < cross2D (a .- p) (b .- p)
 
 drawWorld :: World -> Picture
 drawWorld w = traceShow g $ pictures $ map (uncurry drawFace2D) faces''
@@ -209,18 +211,33 @@ drawFace2D c (Face2D p l) = color (c `addColors` greyN l) $ polygon p
 cubes :: Size -> Color -> [Pos] -> WorldBuilder [WorldFigure]
 cubes s c = mapM $ cube s c
 
+addBehinds :: [FigureId] -> ([FigureId], [FigureId]) -> ([FigureId], [FigureId])
+addBehinds xs (bs, as) = (bs <> xs, as \\ xs)
+
+addAheads :: [FigureId] -> ([FigureId], [FigureId]) -> ([FigureId], [FigureId])
+addAheads xs (bs, as) = (bs \\ xs, as <> xs)
+
+behind :: [WorldFigure] -> [WorldFigure] -> WorldBuilder ()
+behind xs ys = do
+  mapM_ (\x -> _2.worldRules.at x %= Just . addAheads  ys' . fromMaybe mempty) xs'
+  mapM_ (\y -> _2.worldRules.at y %= Just . addBehinds xs' . fromMaybe mempty) ys'
+  where
+    xs' = map (view worldFigureId) xs
+    ys' = map (view worldFigureId) ys
+
 testWorld :: WorldBuilder ()
 testWorld = do
-  cube 0.9 (dark green) $ Pos 0 0 0
-  cube 0.9 (dark red)   $ Pos 1 0 0
-  _2.worldFigures.traverse.worldFigure %= rotateY (pi/4) (Pos 0.5 0.5 0.5)
-  return ()
+  lx <- cubes 0.9 (dark red)   [ Pos n 4 0     | n <- [0..3] ]
+  ly <- cubes 0.9 (dark green) [ Pos 0 n 0     | n <- [0..3] ]
+  lz <- cubes 0.9 (dark blue)  [ Pos 0 0 (- n) | n <- [1..4] ]
+
+  lx `behind` lz
 
 create :: WorldBuilder a -> World
 create = join traceShow . snd . flip execState ([1..], mempty)
 
 updateWorld :: World -> World
-updateWorld = worldFigures.traverse.worldFigure %~ rotateY (- 0.1) (Pos 0.5 0.5 0.5)
+updateWorld = worldFigures.traverse.worldFigure %~ rotateY (- 0.1) (Pos 0 0 0)
 
 main :: IO ()
 main = play display' black 10 (create testWorld) (scale gameScale gameScale . drawWorld) (flip const) (const updateWorld)
