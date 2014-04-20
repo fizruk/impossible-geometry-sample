@@ -19,8 +19,6 @@ import qualified Data.Map as Map
 
 import Graphics.Gloss.Interface.Pure.Game
 
-import Debug.Trace
-
 type Size = Float
 
 type FigureId = Int
@@ -84,7 +82,7 @@ figure c x = do
   return f
 
 cube :: Size -> Color -> Pos -> WorldBuilder WorldFigure
-cube s c p = figure c $ move p cube'
+cube s c p = figure c $ move (p - Pos 0.5 0.5 0.5) cube'
   where
     cube' = map (map (s .*)) $
       [ [Pos 0 0 0, Pos 0 0 1, Pos 0 1 1, Pos 0 1 0 ]
@@ -94,6 +92,15 @@ cube s c p = figure c $ move p cube'
       , [Pos 1 1 1, Pos 0 1 1, Pos 0 0 1, Pos 1 0 1 ]
       , [Pos 1 1 1, Pos 1 1 0, Pos 0 1 0, Pos 0 1 1 ]
       ]
+
+cubes :: Size -> Color -> [Pos] -> WorldBuilder [WorldFigure]
+cubes s c = mapM $ cube s c
+
+wall :: Size -> Color -> Pos -> (Int, Int, Int) -> WorldBuilder [WorldFigure]
+wall s c p (nx, ny, nz) = cubes s c [ p + Pos (fromIntegral x) (fromIntegral y) (fromIntegral z)
+                                    | x <- [0, signum nx .. nx - signum nx * 1]
+                                    , y <- [0, signum ny .. ny - signum ny * 1]
+                                    , z <- [0, signum nz .. nz - signum nz * 1] ]
 
 data Face2D = Face2D
   { _getFace2D :: Path
@@ -110,7 +117,6 @@ faceTo2D ps@(p:q:r:_)
   | otherwise = Nothing
   where
     n = normal (p - q) (q - r)
-    screenN = Pos 1 1 1
     lightN  = Pos 1 (- 3) (- 1)
     light   = 0.5 * (1 + scalar n lightN)
     (p':q':r':_) = map posTo2D ps
@@ -180,7 +186,7 @@ overlap = any . inside
     f p (a, b) = 0 < cross2D (a .- p) (b .- p)
 
 drawWorld :: World -> Picture
-drawWorld w = traceShow g $ pictures $ map (uncurry drawFace2D) faces''
+drawWorld w = pictures $ map (uncurry drawFace2D) faces''
   where
     figures = w ^. worldFigures
     rules = w ^. worldRules
@@ -208,9 +214,6 @@ drawWorld w = traceShow g $ pictures $ map (uncurry drawFace2D) faces''
 drawFace2D :: Color -> Face2D -> Picture
 drawFace2D c (Face2D p l) = color (c `addColors` greyN l) $ polygon p
 
-cubes :: Size -> Color -> [Pos] -> WorldBuilder [WorldFigure]
-cubes s c = mapM $ cube s c
-
 addBehinds :: [FigureId] -> ([FigureId], [FigureId]) -> ([FigureId], [FigureId])
 addBehinds xs (bs, as) = (bs <> xs, as \\ xs)
 
@@ -227,20 +230,27 @@ behind xs ys = do
 
 testWorld :: WorldBuilder ()
 testWorld = do
-  lx <- cubes 0.9 (dark red)   [ Pos n 4 0     | n <- [0..3] ]
-  ly <- cubes 0.9 (dark green) [ Pos 0 n 0     | n <- [0..3] ]
-  lz <- cubes 0.9 (dark blue)  [ Pos 0 0 (- n) | n <- [1..4] ]
+  let wall' = wall 0.9 blue
 
-  lx `behind` lz
+  lx  <- wall' (Pos 0 4 0 ) (5, 1, 1)
+  lx' <- wall' (Pos 0 0 0 ) (5, 1, 1)
+
+  ly  <- wall' (Pos 0 1 0 ) (1, 3, 1)
+  ly' <- wall' (Pos 4 1 0 ) (1, 3, 1)
+
+  lz  <- wall' (Pos 0 0 (-1)) (1, 1, (-2))
+  lz' <- wall' (Pos 4 4 1) (1, 1, 1)
+
+  lz' `behind` lz
 
 create :: WorldBuilder a -> World
-create = join traceShow . snd . flip execState ([1..], mempty)
+create = snd . flip execState ([1..], mempty)
 
 updateWorld :: World -> World
-updateWorld = worldFigures.traverse.worldFigure %~ rotateY (- 0.1) (Pos 0 0 0)
+updateWorld = worldFigures.traverse.worldFigure %~ rotateY 0.02 (Pos 0 0 0)
 
 main :: IO ()
-main = play display' black 10 (create testWorld) (scale gameScale gameScale . drawWorld) (flip const) (const updateWorld)
+main = play display' black 30 (create testWorld) (scale gameScale gameScale . drawWorld) (flip const) (const updateWorld)
   where
     display' = InWindow "Isometry" (640, 480) (200, 200)
 
